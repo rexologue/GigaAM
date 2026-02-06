@@ -1,0 +1,56 @@
+input:
+  # Base directory with audio files.
+  audio_dir: ~/datasets/dialog_audio
+  # Provide either manifest_path or glob.
+  # manifest_path supports JSONL rows like: {"id": "sample_001", "path": "subdir/file.mp3"}
+  manifest_path: null
+  glob: "*.mp3"
+
+output:
+  out_dir: ./runs/dialog_pipeline
+  transcripts_dir: transcripts
+  meta_asr_dir: meta_asr
+  meta_diar_dir: meta_diar
+
+resume:
+  enabled: true
+  retry_failed: false
+  skip_if_outputs_exist: true
+
+pipeline:
+  # One of: full_asr_then_align, diar_cut_then_asr
+  mode: full_asr_then_align
+
+# NVIDIA NeMo diarization model settings.
+diarizer:
+  model_name: nvidia/diar_streaming_sortformer_4spk-v2.1
+  # Example: cuda:0, cpu
+  device: cuda:0
+  chunk_len: 340
+  chunk_right_context: 40
+  fifo_len: 40
+  spkcache_update_period: 300
+
+asr:
+  model_name: v3_ctc
+  # Example: cuda:0, cpu
+  device: cuda:0
+  use_vad: false
+  max_sec: 22.0
+  overlap_sec: 1.0
+  batch_size: 8
+  hf_token: null
+  # Required only when pipeline.mode == diar_cut_then_asr
+  segment_max_sec: 22.0
+
+speaker_rules:
+  # If 3rd speaker share is above this, sample is marked BAD_SAMPLE.
+  third_spk_max_share: 0.10
+  # Tolerance for detecting near-equal share between two speakers.
+  equal_share_eps: 0.05
+  # Runtime heuristics for turn construction/alignment.
+  max_speakers_allowed: 3
+  max_snap_sec: 0.8
+  island_max_words: 2
+  island_max_sec: 1.0
+  pause_new_turn_sec: 0.6
