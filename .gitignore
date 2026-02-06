@@ -5,3 +5,5 @@ build
 .DS_Store
 *tmp*
 onnx
+*yaml
+!config.example.yaml
