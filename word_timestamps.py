@@ -118,6 +118,77 @@ class GigaAMWordTimestampTranscriber:
 
         return all_words
 
+    def transcribe_words_from_waveform(
+        self,
+        audio: torch.Tensor,
+        *,
+        offset_s: float = 0.0,
+        max_chunk_s: Optional[float] = None,
+        overlap_s: Optional[float] = None,
+    ) -> List[WordSpan]:
+        """
+        Transcribe an already loaded waveform (1D tensor, SAMPLE_RATE Hz).
+        Useful when one source file is split to many ASR units and we want to avoid
+        repeated load_audio() calls.
+        """
+        local_max_chunk_s = float(max_chunk_s if max_chunk_s is not None else self.max_chunk_s)
+        local_overlap_s = float(overlap_s if overlap_s is not None else self.overlap_s)
+
+        segments, bounds = self._chunk_audio_fixed(audio, SAMPLE_RATE, local_max_chunk_s, local_overlap_s)
+
+        all_words: List[WordSpan] = []
+        for i in range(0, len(segments), self.batch_size):
+            seg_batch = segments[i : i + self.batch_size]
+            bnd_batch = bounds[i : i + self.batch_size]
+            batch_words = self._infer_batch_words(seg_batch, bnd_batch)
+            all_words.extend(batch_words)
+
+        if local_overlap_s > 0:
+            all_words = self._stitch_overlapped_words(all_words)
+
+        if offset_s:
+            for w in all_words:
+                w.start_s += float(offset_s)
+                w.end_s += float(offset_s)
+        return all_words
+
+    def transcribe_words_from_segments(
+        self,
+        audio: torch.Tensor,
+        segments: List[Tuple[float, float]],
+        *,
+        segment_max_sec: Optional[float] = None,
+    ) -> Tuple[List[WordSpan], List[int]]:
+        """
+        Transcribe diarization segments from one preloaded waveform.
+
+        Returns:
+            - flat list of words with global timestamps
+            - per-word segment index linkage
+        """
+        out_words: List[WordSpan] = []
+        word_segment_ids: List[int] = []
+        threshold = float(segment_max_sec if segment_max_sec is not None else self.max_chunk_s)
+
+        for seg_idx, (start_s, end_s) in enumerate(segments):
+            s0 = int(round(float(start_s) * SAMPLE_RATE))
+            s1 = int(round(float(end_s) * SAMPLE_RATE))
+            wav = audio[s0:s1]
+            if wav.numel() == 0:
+                continue
+
+            local_overlap = self.overlap_s if (end_s - start_s) > threshold else 0.0
+            words = self.transcribe_words_from_waveform(
+                wav,
+                offset_s=float(start_s),
+                max_chunk_s=min(self.max_chunk_s, threshold),
+                overlap_s=local_overlap,
+            )
+            out_words.extend(words)
+            word_segment_ids.extend([seg_idx] * len(words))
+
+        return out_words, word_segment_ids
+
     def transcribe_to_json(self, audio_path: str) -> dict:
         """
         Convenience: same as old script output (but words only; transcript is optional here).
