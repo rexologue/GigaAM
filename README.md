@@ -182,3 +182,32 @@ If you use GigaAM in your research, please cite our paper:
 * [[youtube] Как научить LLM слышать: GigaAM 🤝 GigaChat Audio](https://www.youtube.com/watch?v=O7NSH2SAwRc)
 * [[youtube] GigaAM: Семейство акустических моделей для русского языка](https://youtu.be/PvZuTUnZa2Q?t=26442)
 * [[youtube] Speech-only Pre-training: обучение универсального аудиоэнкодера](https://www.youtube.com/watch?v=ktO4Mx6UMNk)
+
+### Dialog transcription pipeline
+
+Repository includes `dialog_transcribe.py` for high-throughput dialog transcription over directories with `.mp3` files.
+
+```bash
+python dialog_transcribe.py \
+  --in-dir /path/to/in_dir \
+  --out-dir /path/to/out_dir \
+  --device cuda \
+  --diar-batch-size 8 \
+  --asr-model-name v3_ctc \
+  --asr-batch-size 8 \
+  --num-workers 1
+```
+
+Outputs per audio file:
+- `out_dir/transcripts/<stem>.json` — final dialog turns (`Spk0`/`Spk1`) with mapping and stats.
+- `out_dir/meta_asr/<stem>.json` — ASR word timestamps, chunking/VAD params, and summary stats.
+- `out_dir/meta_diar/<stem>.json` — diarization segments, shares, filtering decisions, and stats.
+- `out_dir/manifest.jsonl` — resumable status log (`SUCCESS`, `FAILED`, `SKIPPED`, `BAD_SAMPLE`).
+
+Important flags:
+- Resume and retries: `--retry-failed`, `--dry-run`, `--limit`.
+- 3-speaker policy: `--third-spk-max-share`, `--equal-share-eps`, `--min-dominant-share`.
+- Word↔speaker alignment/turns: `--max-snap-sec`, `--pause-new-turn-sec`, `--island-max-words`, `--island-max-sec`.
+
+Default behavior for bad samples:
+- If diarization returns more than 3 speakers, or 3 near-equal speakers, pipeline marks file as `BAD_SAMPLE` in manifest and skips transcript/meta outputs.
