@@ -65,6 +65,17 @@ def process_file(path: Path) -> List[DialogRow]:
     return turns_to_dialog_rows(merged_turns)
 
 
+def get_turns_count(path: Path) -> int:
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    turns = payload.get("turns", [])
+    if not isinstance(turns, list):
+        return 0
+
+    return len(turns)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Read JSON transcripts and aggregate speaker replicas into dialog rows"
@@ -83,7 +94,21 @@ def main() -> int:
         default="dialogs",
         help="Output directory name inside result_dir (default: dialogs)",
     )
+    parser.add_argument(
+        "--sort-turns",
+        action="store_true",
+        help="Sort transcripts by descending number of turns before processing",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Process only first N transcripts after optional sorting",
+    )
     args = parser.parse_args()
+
+    if args.limit is not None and args.limit < 0:
+        raise SystemExit("--limit must be non-negative")
 
     result_dir = Path(args.result_dir)
     transcripts_dir = result_dir / args.transcripts_dir
@@ -95,6 +120,17 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     json_files = sorted(transcripts_dir.glob("*.json"))
+
+    if args.sort_turns:
+        json_files = sorted(
+            json_files,
+            key=get_turns_count,
+            reverse=True,
+        )
+
+    if args.limit is not None:
+        json_files = json_files[: args.limit]
+
     written = 0
 
     for path in tqdm(json_files, desc="Processing transcripts"):
