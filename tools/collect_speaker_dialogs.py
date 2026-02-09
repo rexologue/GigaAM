@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Dict, List
 
+from tqdm import tqdm
+
 
 Turn = Dict[str, object]
 DialogRow = Dict[str, str]
@@ -95,7 +97,7 @@ def main() -> int:
     json_files = sorted(transcripts_dir.glob("*.json"))
     written = 0
 
-    for path in json_files:
+    for path in tqdm(json_files, desc="Processing transcripts"):
         rows = process_file(path)
         out_path = out_dir / path.name
         with open(out_path, "w", encoding="utf-8") as f:
