@@ -17,6 +17,28 @@ from gigaam.preprocess import SAMPLE_RATE, load_audio
 from pipeline.word_timestamps import WordSpan
 
 
+def _speaker_filter(segments: Sequence[Segment], speakers: Sequence[str], shares: Dict[str, float], cfg: dict):
+    if not bool(cfg["speaker_rules"].get("enabled", True)):
+        return speakers, [], segments, "disabled"
+
+    filt = decide_speaker_filter(
+        shares=shares,
+        third_spk_max_share=float(cfg["speaker_rules"]["third_spk_max_share"]),
+        equal_share_eps=float(cfg["speaker_rules"]["equal_share_eps"]),
+        min_dominant_share=0.0,
+    )
+    if len(speakers) > int(cfg["speaker_rules"].get("max_speakers_allowed", 3)):
+        filt.status = "BAD_SAMPLE"
+        filt.reason = f"too_many_speakers:{len(speakers)}"
+
+    if filt.status != "OK":
+        return None, None, None, filt.reason
+
+    remap_segments = _reassign_dropped_segments(segments, filt.keep_speakers, filt.dropped_speakers)
+    drop_reason = "third_spk_max_share" if filt.dropped_speakers else None
+    return filt.keep_speakers, filt.dropped_speakers, remap_segments, drop_reason
+
+
 def _normalize_speaker_map(kept: Sequence[str], shares: Dict[str, float]) -> Dict[str, str]:
     ordered_kept = sorted(kept, key=lambda s: shares.get(s, 0.0), reverse=True)
     return {orig: f"Spk{i}" for i, orig in enumerate(ordered_kept)}
@@ -84,30 +106,20 @@ def run_full_asr_then_align(job_ctx: dict) -> dict:
     if words is None:
         words = job_ctx["asr"].transcribe_words(job_ctx["audio_path"])
 
-    filt = decide_speaker_filter(
-        shares=shares,
-        third_spk_max_share=float(cfg["speaker_rules"]["third_spk_max_share"]),
-        equal_share_eps=float(cfg["speaker_rules"]["equal_share_eps"]),
-        min_dominant_share=0.0,
-    )
-    if len(speakers) > int(cfg["speaker_rules"].get("max_speakers_allowed", 3)):
-        filt.status = "BAD_SAMPLE"
-        filt.reason = f"too_many_speakers:{len(speakers)}"
-
-    if filt.status != "OK":
+    keep_speakers, dropped_speakers, remap_segments, drop_reason = _speaker_filter(segments, speakers, shares, cfg)
+    if remap_segments is None:
         return {
             "status": "BAD_SAMPLE",
-            "reason": filt.reason,
+            "reason": drop_reason,
             "shares": shares,
             "speakers": speakers,
             "processing_time_sec": time.perf_counter() - t0,
         }
 
-    remap_segments = _reassign_dropped_segments(segments, filt.keep_speakers, filt.dropped_speakers)
     raw_speakers, reassigned_words = assign_words_to_speakers(
         words,
         remap_segments,
-        filt.keep_speakers,
+        keep_speakers,
         float(cfg["speaker_rules"].get("max_snap_sec", 0.8)),
     )
     reassigned_words += smooth_speaker_islands(
@@ -117,7 +129,7 @@ def run_full_asr_then_align(job_ctx: dict) -> dict:
         float(cfg["speaker_rules"].get("island_max_sec", 1.0)),
     )
 
-    speaker_map = _normalize_speaker_map(filt.keep_speakers, shares)
+    speaker_map = _normalize_speaker_map(keep_speakers, shares)
     norm_speakers = [speaker_map.get(s) if s is not None else None for s in raw_speakers]
     turns = build_turns(words, norm_speakers, float(cfg["speaker_rules"].get("pause_new_turn_sec", 0.6)), False)
 
@@ -126,7 +138,7 @@ def run_full_asr_then_align(job_ctx: dict) -> dict:
         words=words,
         turns=turns,
         speaker_map=speaker_map,
-        dropped_speakers=filt.dropped_speakers,
+        dropped_speakers=dropped_speakers,
         processing_time=time.perf_counter() - t0,
         reassigned_words=reassigned_words,
     )
@@ -142,8 +154,8 @@ def run_full_asr_then_align(job_ctx: dict) -> dict:
         "speakers": speakers,
         "shares": shares,
         "postprocessed_segments": [{"spk": s.spk, "start": round(float(s.start), 3), "end": round(float(s.end), 3)} for s in remap_segments],
-        "dropped_speakers": list(filt.dropped_speakers),
-        "drop_reason": "third_spk_max_share" if filt.dropped_speakers else None,
+        "dropped_speakers": list(dropped_speakers),
+        "drop_reason": drop_reason,
     }
     return {"status": "SUCCESS", "transcript": transcript_payload, "meta_asr": meta_asr, "meta_diar": meta_diar, "processing_time_sec": time.perf_counter() - t0}
 
@@ -152,26 +164,16 @@ def run_diar_cut_then_asr(job_ctx: dict) -> dict:
     t0 = time.perf_counter()
     segments, speakers, shares = job_ctx["diar_out"]
     cfg = job_ctx["cfg"]
-    filt = decide_speaker_filter(
-        shares=shares,
-        third_spk_max_share=float(cfg["speaker_rules"]["third_spk_max_share"]),
-        equal_share_eps=float(cfg["speaker_rules"]["equal_share_eps"]),
-        min_dominant_share=0.0,
-    )
-    if len(speakers) > int(cfg["speaker_rules"].get("max_speakers_allowed", 3)):
-        filt.status = "BAD_SAMPLE"
-        filt.reason = f"too_many_speakers:{len(speakers)}"
-
-    if filt.status != "OK":
+    keep_speakers, dropped_speakers, remap_segments, drop_reason = _speaker_filter(segments, speakers, shares, cfg)
+    if remap_segments is None:
         return {
             "status": "BAD_SAMPLE",
-            "reason": filt.reason,
+            "reason": drop_reason,
             "shares": shares,
             "speakers": speakers,
             "processing_time_sec": time.perf_counter() - t0,
         }
 
-    remap_segments = _reassign_dropped_segments(segments, filt.keep_speakers, filt.dropped_speakers)
     waveform = load_audio(job_ctx["audio_path"], SAMPLE_RATE)
     bounds = [(float(s.start), float(s.end)) for s in remap_segments]
     words, word_segment_ids = job_ctx["asr"].transcribe_words_from_segments(
@@ -181,7 +183,7 @@ def run_diar_cut_then_asr(job_ctx: dict) -> dict:
     )
 
     segment_speakers = [s.spk for s in remap_segments]
-    speaker_map = _normalize_speaker_map(filt.keep_speakers, shares)
+    speaker_map = _normalize_speaker_map(keep_speakers, shares)
     norm_word_speakers = [speaker_map.get(segment_speakers[idx]) for idx in word_segment_ids]
     turns = build_turns(words, norm_word_speakers, float(cfg["speaker_rules"].get("pause_new_turn_sec", 0.6)), False)
 
@@ -190,7 +192,7 @@ def run_diar_cut_then_asr(job_ctx: dict) -> dict:
         words=words,
         turns=turns,
         speaker_map=speaker_map,
-        dropped_speakers=filt.dropped_speakers,
+        dropped_speakers=dropped_speakers,
         processing_time=time.perf_counter() - t0,
         reassigned_words=0,
     )
@@ -234,7 +236,7 @@ def run_diar_cut_then_asr(job_ctx: dict) -> dict:
         "speakers": speakers,
         "shares": shares,
         "postprocessed_segments": [{"spk": s.spk, "start": round(float(s.start), 3), "end": round(float(s.end), 3)} for s in remap_segments],
-        "dropped_speakers": list(filt.dropped_speakers),
-        "drop_reason": "third_spk_max_share_reassigned" if filt.dropped_speakers else None,
+        "dropped_speakers": list(dropped_speakers),
+        "drop_reason": drop_reason,
     }
     return {"status": "SUCCESS", "transcript": transcript_payload, "meta_asr": meta_asr, "meta_diar": meta_diar, "processing_time_sec": time.perf_counter() - t0}

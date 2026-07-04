@@ -63,6 +63,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "segment_max_sec": 22.0,
     },
     "speaker_rules": {
+        "enabled": True,
         "third_spk_max_share": 0.10,
         "equal_share_eps": 0.05,
         "max_speakers_allowed": 3,

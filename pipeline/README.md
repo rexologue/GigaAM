@@ -203,6 +203,8 @@ Speaker filtering is controlled by `speaker_rules`. The default behavior is cons
 - three near-equal speakers -> `BAD_SAMPLE`;
 - small third speaker -> dropped and reassigned to the nearest kept speaker where possible.
 
+Set `speaker_rules.enabled: false` to disable these filtering/rejection rules. The pipeline will keep all diarized speakers, skip speaker-share based `BAD_SAMPLE` decisions, and still run word-to-speaker alignment and turn construction.
+
 ## Helper tools
 
 Build a duration-sorted input manifest:

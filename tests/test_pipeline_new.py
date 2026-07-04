@@ -5,7 +5,9 @@ import pytest
 
 from pipeline.dialog_postprocess import decide_speaker_filter
 from pipeline.config_schema import validate_config
+from pipeline.diarizer import Segment
 from pipeline.manifest import load_journal_latest, read_input_manifest, should_skip_by_resume
+from pipeline.modes import run_full_asr_then_align
 from pipeline.word_timestamps import GigaAMWordTimestampTranscriber, WordSpan
 
 
@@ -46,6 +48,37 @@ def test_bad_sample_equal_three_shares():
         min_dominant_share=0.0,
     )
     assert res.status == "BAD_SAMPLE"
+
+
+def test_disabled_speaker_rules_keep_all_speakers():
+    cfg = validate_config(
+        {
+            "input": {"audio_dir": "."},
+            "output": {"out_dir": "out"},
+            "speaker_rules": {"enabled": False},
+        }
+    ).config
+    segments = [
+        Segment("speaker_0", 0.0, 1.0),
+        Segment("speaker_1", 1.0, 2.0),
+        Segment("speaker_2", 2.0, 3.0),
+    ]
+    shares = {"speaker_0": 0.33, "speaker_1": 0.34, "speaker_2": 0.35}
+    words = [WordSpan("a", 0.1, 0.2), WordSpan("b", 1.1, 1.2), WordSpan("c", 2.1, 2.2)]
+
+    result = run_full_asr_then_align(
+        {
+            "audio_path": "x.wav",
+            "diar_out": (segments, sorted(shares), shares),
+            "asr": None,
+            "cfg": cfg,
+            "words": words,
+        }
+    )
+
+    assert result["status"] == "SUCCESS"
+    assert result["transcript"]["speakers"] == ["Spk0", "Spk1", "Spk2"]
+    assert result["transcript"]["mapping"]["dropped_speakers"] == []
 
 
 def test_diar_cut_offsets_words():

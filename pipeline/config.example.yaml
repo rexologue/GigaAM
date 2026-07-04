@@ -44,6 +44,7 @@ resume:
   skip_if_outputs_exist: true
 
 speaker_rules:
+  enabled: true
   third_spk_max_share: 0.10
   equal_share_eps: 0.05
   max_speakers_allowed: 3
