@@ -3,13 +3,26 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+import wave
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Tuple, Optional
 
 import torch
-import torchaudio
-from nemo.collections.asr.models import SortformerEncLabelModel
 
+from gigaam.preprocess import SAMPLE_RATE, load_audio
+
+
+def _get_sortformer_model_cls():
+    try:
+        from nemo.collections.asr.models import SortformerEncLabelModel
+    except ImportError as exc:  # pragma: no cover - dependency-dependent path
+        raise RuntimeError(
+            "Diarization requires NVIDIA NeMo. Install NeMo or use an environment "
+            "that already provides nemo.collections.asr.models.SortformerEncLabelModel."
+        ) from exc
+
+    return SortformerEncLabelModel
 
 _SEG_RE = re.compile(r"^\s*(?P<start>\d+(?:\.\d+)?)\s+(?P<end>\d+(?:\.\d+)?)\s+(?P<spk>\S+)\s*$")
 
@@ -49,7 +62,7 @@ class Diarizer:
     Optimized wrapper:
     - GPU if available
     - inference_mode + autocast (CUDA)
-    - fast audio normalization via sox_effects (mono + 16k) and only then (if needed) write temp wav
+    - audio normalization via the same ffmpeg-backed loader used by GigaAM ASR
     - returns:
         1) segments: List[Segment]
         2) speakers: List[str]
@@ -60,6 +73,9 @@ class Diarizer:
         self,
         model_name: str = "nvidia/diar_streaming_sortformer_4spk-v2.1",
         device: Optional[str] = None,
+        revision: Optional[str] = None,
+        hf_token: Optional[str] = None,
+        local_files_only: bool = False,
         chunk_len: int = 340,
         chunk_right_context: int = 40,
         fifo_len: int = 40,
@@ -69,7 +85,12 @@ class Diarizer:
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.use_amp = bool(use_amp) and (self.device.type == "cuda")
 
-        self.diar_model = SortformerEncLabelModel.from_pretrained(model_name)
+        self.diar_model = self._load_model(
+            model_name=model_name,
+            revision=revision,
+            hf_token=hf_token,
+            local_files_only=local_files_only,
+        )
         self.diar_model.eval()
         self.diar_model.to(self.device)
 
@@ -86,24 +107,95 @@ class Diarizer:
             torch.backends.cudnn.benchmark = True
 
     @staticmethod
-    def _ensure_wav16k_mono_to_tmp(src_path: str, tmpdir: str, idx: int) -> Tuple[str, float]:
+    def _looks_like_local_path(model_name: str) -> bool:
+        path = Path(model_name).expanduser()
+        return model_name.startswith((".", "~")) or path.is_absolute() or path.exists()
+
+    @staticmethod
+    def _restore_nemo_model(path: Path):
+        try:
+            return _get_sortformer_model_cls().restore_from(restore_path=str(path))
+        except TypeError:
+            return _get_sortformer_model_cls().restore_from(str(path))
+
+    @classmethod
+    def _load_local_model(cls, model_name: str):
+        path = Path(model_name).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(f"Local diarizer model path does not exist: {path}")
+
+        if path.is_file():
+            if path.suffix == ".nemo":
+                return cls._restore_nemo_model(path)
+            raise ValueError(f"Local diarizer model file must be a .nemo archive, got: {path}")
+
+        nemo_files = sorted(path.glob("*.nemo"))
+        if len(nemo_files) == 1:
+            return cls._restore_nemo_model(nemo_files[0])
+        if len(nemo_files) > 1:
+            names = ", ".join(p.name for p in nemo_files[:8])
+            raise ValueError(f"Multiple .nemo files found under {path}: {names}. Pass the exact .nemo path instead.")
+
+        return _get_sortformer_model_cls().from_pretrained(str(path))
+
+    @classmethod
+    def _load_model(
+        cls,
+        *,
+        model_name: str,
+        revision: Optional[str],
+        hf_token: Optional[str],
+        local_files_only: bool,
+    ):
+        if cls._looks_like_local_path(model_name):
+            return cls._load_local_model(model_name)
+
+        if revision is None and hf_token is None and not local_files_only:
+            return _get_sortformer_model_cls().from_pretrained(model_name)
+
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError as exc:  # pragma: no cover - dependency-dependent path
+            raise RuntimeError(
+                "revision/hf_token/local_files_only for diarizer models requires huggingface_hub. "
+                "Install it or pass a local model path."
+            ) from exc
+
+        local_path = snapshot_download(
+            repo_id=model_name,
+            revision=revision,
+            token=hf_token,
+            local_files_only=local_files_only,
+        )
+        return cls._load_local_model(local_path)
+
+    @staticmethod
+    def _write_wav16(path: str, audio: torch.Tensor, sample_rate: int) -> None:
+        audio = audio.detach().cpu().flatten().clamp(-1.0, 1.0)
+        pcm = (audio * 32767.0).round().to(torch.int16).numpy().tobytes()
+
+        with wave.open(path, "wb") as f:
+            f.setnchannels(1)
+            f.setsampwidth(2)
+            f.setframerate(sample_rate)
+            f.writeframes(pcm)
+
+    @classmethod
+    def _ensure_wav16k_mono_to_tmp(cls, src_path: str, tmpdir: str, idx: int) -> Tuple[str, float]:
         """
-        Convert any input to WAV 16k mono using sox effects (fast, uses libsox).
+        Convert any input to a temporary WAV 16 kHz mono file.
+
+        This intentionally uses the same ffmpeg-backed loader as the ASR path.
+        It avoids torchaudio.sox_effects, because many production images have
+        ffmpeg but do not ship libsox.so.
+
         Returns (dst_wav_path, duration_sec).
         """
-        # sox effects: downmix to 1ch + resample to 16k
-        effects = [
-            ["remix", "1"],     # mono (take channel 1; for stereo this is usually enough and faster than mean)
-            ["rate", "16000"],
-        ]
-
-        wav, sr = torchaudio.sox_effects.apply_effects_file(src_path, effects=effects)
-        # wav: (1, T)
+        audio = load_audio(src_path, SAMPLE_RATE)
         dst = os.path.join(tmpdir, f"{idx}.wav")
-        torchaudio.save(dst, wav, 16000, encoding="PCM_S", bits_per_sample=16)
+        cls._write_wav16(dst, audio, SAMPLE_RATE)
 
-        # duration from samples (post-conversion)
-        duration_sec = float(wav.shape[1]) / 16000.0
+        duration_sec = float(audio.numel()) / float(SAMPLE_RATE)
         return dst, duration_sec
 
     @staticmethod
@@ -162,7 +254,7 @@ class Diarizer:
             wav_paths: List[str] = []
             durations: List[float] = []
 
-            # Convert in a tight loop (sox is typically faster than python resample/mean)
+            # Convert in a tight loop before sending normalized wavs to NeMo.
             for i, src in enumerate(paths_batch):
                 dst, dur = self._ensure_wav16k_mono_to_tmp(src, tmpdir, i)
                 wav_paths.append(dst)
@@ -187,15 +279,3 @@ class Diarizer:
                 out.append((segments, speakers, shares))
 
             return out
-
-
-if __name__ == "__main__":
-    d = Diarizer()
-    res = d.diarize(["/root/audio/3844580337_0f49b1df58159bd58ea5f08fd4bbbe10_79036263700.mp3"])
-
-    segments, speakers, shares = res[0]
-    print("Speakers:", speakers)
-    print("Shares:", {k: round(v * 100, 2) for k, v in shares.items()}, "%")
-    print("First 10 segments:")
-    for seg in segments[:10]:
-        print(seg)

@@ -11,7 +11,7 @@ class Segment:
     start: float
     end: float
 
-from dialog_transcribe import (
+from pipeline.dialog_postprocess import (
     WordSpan,
     assign_words_to_speakers,
     build_turns,

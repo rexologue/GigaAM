@@ -6,15 +6,15 @@ from pathlib import Path
 from statistics import mean
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from diarizer import Segment
-from dialog_transcribe import (
+from pipeline.diarizer import Segment
+from pipeline.dialog_postprocess import (
     assign_words_to_speakers,
     build_turns,
     decide_speaker_filter,
     smooth_speaker_islands,
 )
 from gigaam.preprocess import SAMPLE_RATE, load_audio
-from word_timestamps import WordSpan
+from pipeline.word_timestamps import WordSpan
 
 
 def _normalize_speaker_map(kept: Sequence[str], shares: Dict[str, float]) -> Dict[str, str]:

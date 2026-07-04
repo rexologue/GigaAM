@@ -59,6 +59,10 @@ class GigaAMWordTimestampTranscriber:
         max_chunk_s: float = 22.0,
         overlap_s: float = 1.0,
         hf_token: Optional[str] = None,
+        hf_revision: Optional[str] = None,
+        local_files_only: bool = False,
+        trust_remote_code: bool = True,
+        verify_checksum: Optional[bool] = None,
         batch_size: int = 8,
     ) -> None:
         self.model_name = model_name
@@ -67,6 +71,10 @@ class GigaAMWordTimestampTranscriber:
         self.max_chunk_s = float(max_chunk_s)
         self.overlap_s = float(overlap_s)
         self.hf_token = hf_token
+        self.hf_revision = hf_revision
+        self.local_files_only = bool(local_files_only)
+        self.trust_remote_code = bool(trust_remote_code)
+        self.verify_checksum = verify_checksum
         self.batch_size = int(batch_size)
 
         if self.use_vad and not _HAS_VAD:
@@ -76,7 +84,15 @@ class GigaAMWordTimestampTranscriber:
             # pyannote pipelines typically read HF_TOKEN
             os.environ.setdefault("HF_TOKEN", self.hf_token)
 
-        self.model = load_model(self.model_name, device=self.device)
+        self.model = load_model(
+            self.model_name,
+            device=self.device,
+            hf_revision=self.hf_revision,
+            hf_token=self.hf_token,
+            local_files_only=self.local_files_only,
+            trust_remote_code=self.trust_remote_code,
+            verify_checksum=self.verify_checksum,
+        )
         if not self._is_ctc_head(self.model):
             raise RuntimeError("This class expects a GigaAM ASR model with a CTC head.")
 
@@ -468,26 +484,3 @@ class GigaAMWordTimestampTranscriber:
                 continue
             out.append(w)
         return out
-
-
-# -----------------------------
-# Example usage (no argparse)
-# -----------------------------
-if __name__ == "__main__":
-    tr = GigaAMWordTimestampTranscriber(
-        model_name="v3_e2e_ctc",
-        device="cuda",          # auto
-        use_vad=True,
-        max_chunk_s=22.0,
-        overlap_s=1.0,
-        hf_token="...",
-        batch_size=8,
-    )
-
-    audio_path = "/root/audio/3844580337_0f49b1df58159bd58ea5f08fd4bbbe10_79036263700.mp3"
-    words: List[WordSpan] = tr.transcribe_words(audio_path)
-    print(json.dumps(
-        [{"word": w.word, "start": round(w.start_s, 3), "end": round(w.end_s, 3)} for w in words],
-        ensure_ascii=False,
-        indent=2,
-    ))

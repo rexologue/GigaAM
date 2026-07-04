@@ -1,9 +1,9 @@
 import json
 from pathlib import Path
 
-from dialog_transcribe import decide_speaker_filter
+from pipeline.dialog_postprocess import decide_speaker_filter
 from pipeline.manifest import load_journal_latest, read_input_manifest, should_skip_by_resume
-from word_timestamps import GigaAMWordTimestampTranscriber, WordSpan
+from pipeline.word_timestamps import GigaAMWordTimestampTranscriber, WordSpan
 
 
 def test_manifest_read_order_jsonl(tmp_path: Path):

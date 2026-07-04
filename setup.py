@@ -12,7 +12,7 @@ setup(
     author="GigaChat Team",
     url="https://github.com/salute-developers/GigaAM/",
     license="MIT",
-    packages=find_packages(include=["gigaam"]),
+    packages=find_packages(include=["gigaam", "gigaam.*", "pipeline", "pipeline.*"]),
     python_requires=">=3.10",
     install_requires=[
         str(r)

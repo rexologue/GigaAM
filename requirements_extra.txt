@@ -1,2 +1,4 @@
 nemo_toolkit[asr]
 mutagen
+transformers>=4.40
+huggingface-hub>=0.23

@@ -7,7 +7,7 @@ input:
   glob: "*.mp3"
 
 output:
-  out_dir: ./runs/dialog_pipeline
+  out_dir: ../runs/dialog_pipeline
   transcripts_dir: transcripts
   meta_asr_dir: meta_asr
   meta_diar_dir: meta_diar
@@ -23,7 +23,11 @@ pipeline:
 
 # NVIDIA NeMo diarization model settings.
 diarizer:
+  # HF repo id, local HF snapshot directory, or local .nemo file.
   model_name: nvidia/diar_streaming_sortformer_4spk-v2.1
+  revision: null
+  hf_token: null
+  local_files_only: false
   # Example: cuda:0, cpu
   device: cuda:0
   chunk_len: 340
@@ -32,7 +36,14 @@ diarizer:
   spkcache_update_period: 300
 
 asr:
+  # Built-in alias like v3_ctc, local .ckpt/local directory, or HF repo id.
   model_name: v3_ctc
+  # For HF ids, set revision/hf_revision when needed, e.g. ctc/e2e_ctc.
+  hf_revision: null
+  local_files_only: false
+  trust_remote_code: true
+  # Local checkpoints are not checksum-verified by default.
+  verify_checksum: null
   # Example: cuda:0, cpu
   device: cuda:0
   use_vad: false
