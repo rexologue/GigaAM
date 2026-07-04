@@ -9,10 +9,15 @@ output:
 pipeline:
   # mode: full_asr_then_align | diar_cut_then_asr
   mode: full_asr_then_align
-  # execution: sequential keeps the old one-file-at-a-time behavior.
-  # batched groups several files for Sortformer and, in full_asr_then_align, GigaAM CTC.
+  # execution: sequential | batched | multi_instance
   execution: sequential
+  # multi_instance starts num_instances worker processes; each process owns its own models.
+  num_instances: 1
+  # Number of pending file batches allowed per instance.
+  batches_per_instance: 1
+  # Files per batch inside one process/instance.
   file_batch_size: 4
+  # Files pooled into one ASR call after diarization.
   asr_file_batch_size: 4
   show_progress: true
   suppress_internal_progress: true

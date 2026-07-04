@@ -29,6 +29,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "pipeline": {
         "mode": "full_asr_then_align",
         "execution": "sequential",
+        "num_instances": 1,
+        "batches_per_instance": 1,
         "file_batch_size": 1,
         "asr_file_batch_size": 4,
         "show_progress": True,
@@ -153,8 +155,12 @@ def validate_config(cfg: Dict[str, Any], *, base_dir: Optional[Path] = None) -> 
     if mode not in {"full_asr_then_align", "diar_cut_then_asr"}:
         raise ValueError("pipeline.mode must be full_asr_then_align or diar_cut_then_asr")
     execution = _require(pipeline_cfg, "execution", "pipeline")
-    if execution not in {"sequential", "batched"}:
-        raise ValueError("pipeline.execution must be sequential or batched")
+    if execution not in {"sequential", "batched", "multi_instance"}:
+        raise ValueError("pipeline.execution must be sequential, batched, or multi_instance")
+    if int(pipeline_cfg.get("num_instances", 1)) <= 0:
+        raise ValueError("pipeline.num_instances must be > 0")
+    if int(pipeline_cfg.get("batches_per_instance", 1)) <= 0:
+        raise ValueError("pipeline.batches_per_instance must be > 0")
     if int(pipeline_cfg.get("file_batch_size", 1)) <= 0:
         raise ValueError("pipeline.file_batch_size must be > 0")
     if int(pipeline_cfg.get("asr_file_batch_size", 4)) <= 0:

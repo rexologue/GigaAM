@@ -99,6 +99,8 @@ This can be useful when full-file ASR alignment is unstable, but it is usually s
 pipeline:
   mode: full_asr_then_align
   execution: sequential
+  num_instances: 1
+  batches_per_instance: 1
   file_batch_size: 4
   asr_file_batch_size: 4
   show_progress: true
@@ -107,8 +109,14 @@ pipeline:
 
 - `sequential` keeps the old behavior: one audio file is diarized and transcribed at a time.
 - `batched` groups up to `file_batch_size` files for Sortformer diarization.
+- `multi_instance` starts `num_instances` worker processes. Each worker loads its own Sortformer and GigaAM instances and processes batches of up to `file_batch_size` files.
+- `batches_per_instance` controls how many file batches may be queued ahead per worker process. Keep it low, usually `1`, to avoid holding too many decoded/intermediate results in memory.
 - In `full_asr_then_align`, `batched` also groups GigaAM CTC chunks across files. `asr_file_batch_size` controls how many files are pooled into one ASR call after diarization. The result mapping is positional, so output `i` always belongs to input file `i`.
 - In `diar_cut_then_asr`, `batched` currently batches the diarization stage; ASR remains per file because it depends on diarization segments.
+
+In `multi_instance`, workers never write output files or the journal. They return completed per-file payloads to the parent process, and the parent is the only process that writes `transcripts/`, `meta_asr/`, `meta_diar/`, and `manifest.jsonl`. This keeps resume behavior deterministic and avoids concurrent writes to the same output tree.
+
+Each instance loads its own model copies. On a single GPU, start conservatively, for example `num_instances: 2`, `batches_per_instance: 1`, `file_batch_size: 4`, and increase only if GPU memory and throughput measurements justify it.
 
 ASR chunk batching is controlled separately:
 

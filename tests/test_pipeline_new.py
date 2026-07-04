@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from pipeline.dialog_postprocess import decide_speaker_filter
 from pipeline.config_schema import validate_config
 from pipeline.manifest import load_journal_latest, read_input_manifest, should_skip_by_resume
@@ -117,9 +119,37 @@ def test_config_defaults_and_legacy_asr_batch_size(tmp_path: Path):
     ).config
 
     assert cfg["pipeline"]["execution"] == "sequential"
+    assert cfg["pipeline"]["num_instances"] == 1
+    assert cfg["pipeline"]["batches_per_instance"] == 1
     assert cfg["pipeline"]["file_batch_size"] == 1
     assert cfg["pipeline"]["asr_file_batch_size"] == 4
     assert cfg["pipeline"]["show_progress"] is True
     assert cfg["pipeline"]["suppress_internal_progress"] is True
     assert cfg["asr"]["chunk_batch_size"] == 3
     assert "batch_size" not in cfg["asr"]
+
+
+def test_config_accepts_multi_instance(tmp_path: Path):
+    cfg = validate_config(
+        {
+            "input": {"audio_dir": "."},
+            "output": {"out_dir": "out"},
+            "pipeline": {"execution": "multi_instance", "num_instances": 2, "batches_per_instance": 1},
+        },
+        base_dir=tmp_path,
+    ).config
+
+    assert cfg["pipeline"]["execution"] == "multi_instance"
+    assert cfg["pipeline"]["num_instances"] == 2
+
+
+def test_config_rejects_invalid_multi_instance_counts(tmp_path: Path):
+    with pytest.raises(ValueError, match="num_instances"):
+        validate_config(
+            {
+                "input": {"audio_dir": "."},
+                "output": {"out_dir": "out"},
+                "pipeline": {"execution": "multi_instance", "num_instances": 0},
+            },
+            base_dir=tmp_path,
+        )
