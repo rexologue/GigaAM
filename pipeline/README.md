@@ -100,13 +100,14 @@ pipeline:
   mode: full_asr_then_align
   execution: sequential
   file_batch_size: 4
+  asr_file_batch_size: 4
   show_progress: true
   suppress_internal_progress: true
 ```
 
 - `sequential` keeps the old behavior: one audio file is diarized and transcribed at a time.
 - `batched` groups up to `file_batch_size` files for Sortformer diarization.
-- In `full_asr_then_align`, `batched` also groups GigaAM CTC chunks across files. The result mapping is positional, so output `i` always belongs to input file `i`.
+- In `full_asr_then_align`, `batched` also groups GigaAM CTC chunks across files. `asr_file_batch_size` controls how many files are pooled into one ASR call after diarization. The result mapping is positional, so output `i` always belongs to input file `i`.
 - In `diar_cut_then_asr`, `batched` currently batches the diarization stage; ASR remains per file because it depends on diarization segments.
 
 ASR chunk batching is controlled separately:
@@ -120,7 +121,9 @@ asr:
 
 `overlap_sec` keeps the same quality behavior in both execution modes. Chunks may overlap, and duplicate words are stitched independently inside each file after inference. The batched path does not stitch words across files.
 
-When `show_progress` is enabled, the CLI shows one pipeline-level progress bar with throughput, ETA, and a status postfix. `suppress_internal_progress` redirects noisy model-level stdout/stderr during inference so library progress bars, including NeMo's per-sample progress, do not clutter the output. The final JSON summary is still printed to stdout.
+When `show_progress` is enabled, the CLI shows one pipeline-level progress bar with throughput, ETA, current stage, and a status postfix. `suppress_internal_progress` redirects noisy model-level stdout/stderr during inference so library progress bars, including NeMo's per-sample progress, do not clutter the output. The final JSON summary is still printed to stdout.
+
+Progress advances when a file reaches a final status. Very large `file_batch_size` values can still make the bar pause during the opaque Sortformer batch call. Keep `asr_file_batch_size` modest, for example 4-8, if you want ASR-stage progress and ETA to update regularly while still batching chunks across files.
 
 ## Model references
 

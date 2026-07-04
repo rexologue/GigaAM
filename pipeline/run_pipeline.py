@@ -97,30 +97,32 @@ def main() -> int:
     for path in (out_dir, transcripts_dir, meta_asr_dir, meta_diar_dir):
         path.mkdir(parents=True, exist_ok=True)
 
-    diarizer = Diarizer(
-        model_name=cfg["diarizer"].get("model_name", "nvidia/diar_streaming_sortformer_4spk-v2.1"),
-        device=cfg["diarizer"].get("device"),
-        revision=cfg["diarizer"].get("revision"),
-        hf_token=cfg["diarizer"].get("hf_token"),
-        local_files_only=bool(cfg["diarizer"].get("local_files_only", False)),
-        chunk_len=int(cfg["diarizer"].get("chunk_len", 340)),
-        chunk_right_context=int(cfg["diarizer"].get("chunk_right_context", 40)),
-        fifo_len=int(cfg["diarizer"].get("fifo_len", 40)),
-        spkcache_update_period=int(cfg["diarizer"].get("spkcache_update_period", 300)),
-    )
-    asr = GigaAMWordTimestampTranscriber(
-        model_name=cfg["asr"].get("model_name", "v3_ctc"),
-        device=cfg["asr"].get("device"),
-        use_vad=bool(cfg["asr"].get("use_vad", False)),
-        max_chunk_s=float(cfg["asr"].get("max_sec", 22.0)),
-        overlap_s=float(cfg["asr"].get("overlap_sec", 1.0)),
-        hf_token=cfg["asr"].get("hf_token"),
-        hf_revision=cfg["asr"].get("hf_revision") or cfg["asr"].get("revision"),
-        local_files_only=bool(cfg["asr"].get("local_files_only", False)),
-        trust_remote_code=bool(cfg["asr"].get("trust_remote_code", True)),
-        verify_checksum=cfg["asr"].get("verify_checksum"),
-        batch_size=int(cfg["asr"].get("chunk_batch_size", cfg["asr"].get("batch_size", 8))),
-    )
+    suppress_internal_progress = bool(cfg["pipeline"].get("suppress_internal_progress", True))
+    with _suppress_output(suppress_internal_progress):
+        diarizer = Diarizer(
+            model_name=cfg["diarizer"].get("model_name", "nvidia/diar_streaming_sortformer_4spk-v2.1"),
+            device=cfg["diarizer"].get("device"),
+            revision=cfg["diarizer"].get("revision"),
+            hf_token=cfg["diarizer"].get("hf_token"),
+            local_files_only=bool(cfg["diarizer"].get("local_files_only", False)),
+            chunk_len=int(cfg["diarizer"].get("chunk_len", 340)),
+            chunk_right_context=int(cfg["diarizer"].get("chunk_right_context", 40)),
+            fifo_len=int(cfg["diarizer"].get("fifo_len", 40)),
+            spkcache_update_period=int(cfg["diarizer"].get("spkcache_update_period", 300)),
+        )
+        asr = GigaAMWordTimestampTranscriber(
+            model_name=cfg["asr"].get("model_name", "v3_ctc"),
+            device=cfg["asr"].get("device"),
+            use_vad=bool(cfg["asr"].get("use_vad", False)),
+            max_chunk_s=float(cfg["asr"].get("max_sec", 22.0)),
+            overlap_s=float(cfg["asr"].get("overlap_sec", 1.0)),
+            hf_token=cfg["asr"].get("hf_token"),
+            hf_revision=cfg["asr"].get("hf_revision") or cfg["asr"].get("revision"),
+            local_files_only=bool(cfg["asr"].get("local_files_only", False)),
+            trust_remote_code=bool(cfg["asr"].get("trust_remote_code", True)),
+            verify_checksum=cfg["asr"].get("verify_checksum"),
+            batch_size=int(cfg["asr"].get("chunk_batch_size", cfg["asr"].get("batch_size", 8))),
+        )
 
     mode_fn = run_full_asr_then_align if cfg["pipeline"]["mode"] == "full_asr_then_align" else run_diar_cut_then_asr
     latest = load_journal_latest(journal_path)
@@ -128,8 +130,11 @@ def main() -> int:
     counters: Counter[str] = Counter()
     pending_items: List[dict] = []
     show_progress = bool(cfg["pipeline"].get("show_progress", True))
-    suppress_internal_progress = bool(cfg["pipeline"].get("suppress_internal_progress", True))
     pbar = tqdm(total=len(items), desc="Dialog pipeline", unit="file", dynamic_ncols=True, disable=not show_progress)
+
+    def set_stage(stage: str) -> None:
+        pbar.set_description_str(f"Dialog pipeline | {stage}")
+        pbar.refresh()
 
     def record_status(status: str) -> None:
         counters[status] += 1
@@ -227,19 +232,12 @@ def main() -> int:
         paths = [item["path"] for item in batch_items]
         diar_batch_size = int(cfg["diarizer"].get("batch_size") or len(paths))
         try:
+            set_stage(f"diar {len(batch_items)} files")
             with _suppress_output(suppress_internal_progress):
                 diar_outputs = diarizer.diarize(paths, batch_size=diar_batch_size)
             pbar.refresh()
             if len(diar_outputs) != len(batch_items):
                 raise RuntimeError(f"Diarizer returned {len(diar_outputs)} outputs for {len(batch_items)} inputs")
-
-            words_outputs = None
-            if cfg["pipeline"]["mode"] == "full_asr_then_align":
-                with _suppress_output(suppress_internal_progress):
-                    words_outputs = asr.transcribe_words_many(paths)
-                pbar.refresh()
-                if len(words_outputs) != len(batch_items):
-                    raise RuntimeError(f"ASR returned {len(words_outputs)} outputs for {len(batch_items)} inputs")
         except Exception as exc:  # noqa: BLE001
             if len(batch_items) == 1:
                 process_one(batch_items[0], failed_reason=repr(exc))
@@ -248,13 +246,38 @@ def main() -> int:
                 process_one(item)
             return
 
-        for idx, item in enumerate(batch_items):
-            words = words_outputs[idx] if words_outputs is not None else None
-            process_one(item, diar_out=diar_outputs[idx], words=words)
+        if cfg["pipeline"]["mode"] != "full_asr_then_align":
+            for idx, item in enumerate(batch_items):
+                set_stage(f"asr {item['id']}")
+                process_one(item, diar_out=diar_outputs[idx])
+            return
+
+        asr_file_batch_size = int(cfg["pipeline"].get("asr_file_batch_size", len(batch_items)))
+        indexed = list(enumerate(batch_items))
+        for sub_batch in _batched(indexed, asr_file_batch_size):
+            sub_indices = [idx for idx, _item in sub_batch]
+            sub_items = [item for _idx, item in sub_batch]
+            sub_paths = [item["path"] for item in sub_items]
+            try:
+                set_stage(f"asr {len(sub_items)} files")
+                with _suppress_output(suppress_internal_progress):
+                    words_outputs = asr.transcribe_words_many(sub_paths)
+                pbar.refresh()
+                if len(words_outputs) != len(sub_items):
+                    raise RuntimeError(f"ASR returned {len(words_outputs)} outputs for {len(sub_items)} inputs")
+            except Exception:  # noqa: BLE001
+                for idx, item in zip(sub_indices, sub_items):
+                    set_stage(f"asr {item['id']}")
+                    process_one(item, diar_out=diar_outputs[idx])
+                continue
+
+            for local_idx, item in enumerate(sub_items):
+                process_one(item, diar_out=diar_outputs[sub_indices[local_idx]], words=words_outputs[local_idx])
 
     execution = cfg["pipeline"].get("execution", "sequential")
     if execution == "sequential":
         for item in pending_items:
+            set_stage(f"file {item['id']}")
             process_one(item)
     elif execution == "batched":
         file_batch_size = int(cfg["pipeline"].get("file_batch_size", 1))

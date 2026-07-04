@@ -30,6 +30,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "mode": "full_asr_then_align",
         "execution": "sequential",
         "file_batch_size": 1,
+        "asr_file_batch_size": 4,
         "show_progress": True,
         "suppress_internal_progress": True,
     },
@@ -156,6 +157,8 @@ def validate_config(cfg: Dict[str, Any], *, base_dir: Optional[Path] = None) -> 
         raise ValueError("pipeline.execution must be sequential or batched")
     if int(pipeline_cfg.get("file_batch_size", 1)) <= 0:
         raise ValueError("pipeline.file_batch_size must be > 0")
+    if int(pipeline_cfg.get("asr_file_batch_size", 4)) <= 0:
+        raise ValueError("pipeline.asr_file_batch_size must be > 0")
 
     if "batch_size" in raw_asr_cfg and "chunk_batch_size" not in raw_asr_cfg:
         asr_cfg["chunk_batch_size"] = asr_cfg["batch_size"]

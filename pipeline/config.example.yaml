@@ -13,6 +13,7 @@ pipeline:
   # batched groups several files for Sortformer and, in full_asr_then_align, GigaAM CTC.
   execution: sequential
   file_batch_size: 4
+  asr_file_batch_size: 4
   show_progress: true
   suppress_internal_progress: true
 
