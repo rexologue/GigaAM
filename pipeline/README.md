@@ -91,6 +91,33 @@ This is usually the better default when word timestamps are stable enough.
 
 This can be useful when full-file ASR alignment is unstable, but it is usually slower.
 
+## Pipeline execution
+
+`pipeline.execution` controls how many audio files are processed together:
+
+```yaml
+pipeline:
+  mode: full_asr_then_align
+  execution: sequential
+  file_batch_size: 4
+```
+
+- `sequential` keeps the old behavior: one audio file is diarized and transcribed at a time.
+- `batched` groups up to `file_batch_size` files for Sortformer diarization.
+- In `full_asr_then_align`, `batched` also groups GigaAM CTC chunks across files. The result mapping is positional, so output `i` always belongs to input file `i`.
+- In `diar_cut_then_asr`, `batched` currently batches the diarization stage; ASR remains per file because it depends on diarization segments.
+
+ASR chunk batching is controlled separately:
+
+```yaml
+asr:
+  chunk_batch_size: 8
+  max_sec: 22.0
+  overlap_sec: 1.0
+```
+
+`overlap_sec` keeps the same quality behavior in both execution modes. Chunks may overlap, and duplicate words are stitched independently inside each file after inference. The batched path does not stitch words across files.
+
 ## Model references
 
 Both ASR and diarization model fields support local paths and Hugging Face identifiers.

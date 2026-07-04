@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -8,6 +9,74 @@ from typing import Any, Dict, Optional
 @dataclass
 class ConfigValidationResult:
     config: Dict[str, Any]
+
+
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "input": {
+        "manifest_path": None,
+        "glob": "*.mp3",
+    },
+    "output": {
+        "transcripts_dir": "transcripts",
+        "meta_asr_dir": "meta_asr",
+        "meta_diar_dir": "meta_diar",
+    },
+    "resume": {
+        "enabled": True,
+        "retry_failed": False,
+        "skip_if_outputs_exist": True,
+    },
+    "pipeline": {
+        "mode": "full_asr_then_align",
+        "execution": "sequential",
+        "file_batch_size": 1,
+    },
+    "diarizer": {
+        "model_name": "nvidia/diar_streaming_sortformer_4spk-v2.1",
+        "revision": None,
+        "hf_token": None,
+        "local_files_only": False,
+        "device": None,
+        "batch_size": None,
+        "chunk_len": 340,
+        "chunk_right_context": 40,
+        "fifo_len": 40,
+        "spkcache_update_period": 300,
+    },
+    "asr": {
+        "model_name": "v3_ctc",
+        "hf_revision": None,
+        "local_files_only": False,
+        "trust_remote_code": True,
+        "verify_checksum": None,
+        "device": None,
+        "use_vad": False,
+        "max_sec": 22.0,
+        "overlap_sec": 1.0,
+        "chunk_batch_size": 8,
+        "hf_token": None,
+        "segment_max_sec": 22.0,
+    },
+    "speaker_rules": {
+        "third_spk_max_share": 0.10,
+        "equal_share_eps": 0.05,
+        "max_speakers_allowed": 3,
+        "max_snap_sec": 0.8,
+        "island_max_words": 2,
+        "island_max_sec": 1.0,
+        "pause_new_turn_sec": 0.6,
+    },
+}
+
+
+def _merge_defaults(cfg: Dict[str, Any], defaults: Dict[str, Any]) -> Dict[str, Any]:
+    merged = deepcopy(defaults)
+    for key, value in cfg.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_defaults(value, merged[key])
+        else:
+            merged[key] = value
+    return merged
 
 
 def _require(cfg: Dict[str, Any], key: str, section: str) -> Any:
@@ -63,13 +132,14 @@ def _resolve_model_ref(value: Any, *, base_dir: Optional[Path]) -> Any:
 
 
 def validate_config(cfg: Dict[str, Any], *, base_dir: Optional[Path] = None) -> ConfigValidationResult:
-    for section in ("input", "output", "resume", "pipeline", "diarizer", "asr", "speaker_rules"):
-        if section not in cfg:
-            raise ValueError(f"Missing required section '{section}'")
+    raw_asr_cfg = (cfg or {}).get("asr", {}) if isinstance((cfg or {}).get("asr", {}), dict) else {}
+    cfg = _merge_defaults(cfg or {}, DEFAULT_CONFIG)
 
     input_cfg = cfg["input"]
     output_cfg = cfg["output"]
     pipeline_cfg = cfg["pipeline"]
+    diarizer_cfg = cfg["diarizer"]
+    asr_cfg = cfg["asr"]
 
     _require(input_cfg, "audio_dir", "input")
     if input_cfg.get("manifest_path") is None and input_cfg.get("glob") is None:
@@ -79,6 +149,20 @@ def validate_config(cfg: Dict[str, Any], *, base_dir: Optional[Path] = None) -> 
     mode = _require(pipeline_cfg, "mode", "pipeline")
     if mode not in {"full_asr_then_align", "diar_cut_then_asr"}:
         raise ValueError("pipeline.mode must be full_asr_then_align or diar_cut_then_asr")
+    execution = _require(pipeline_cfg, "execution", "pipeline")
+    if execution not in {"sequential", "batched"}:
+        raise ValueError("pipeline.execution must be sequential or batched")
+    if int(pipeline_cfg.get("file_batch_size", 1)) <= 0:
+        raise ValueError("pipeline.file_batch_size must be > 0")
+
+    if "batch_size" in raw_asr_cfg and "chunk_batch_size" not in raw_asr_cfg:
+        asr_cfg["chunk_batch_size"] = asr_cfg["batch_size"]
+    asr_cfg.pop("batch_size", None)
+    if int(asr_cfg.get("chunk_batch_size", 8)) <= 0:
+        raise ValueError("asr.chunk_batch_size must be > 0")
+    diar_batch_size = diarizer_cfg.get("batch_size")
+    if diar_batch_size is not None and int(diar_batch_size) <= 0:
+        raise ValueError("diarizer.batch_size must be > 0 when set")
 
     if mode == "diar_cut_then_asr" and "segment_max_sec" not in cfg["asr"]:
         raise ValueError("asr.segment_max_sec is required for diar_cut_then_asr mode")

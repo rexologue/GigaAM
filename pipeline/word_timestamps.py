@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -134,6 +134,46 @@ class GigaAMWordTimestampTranscriber:
 
         return all_words
 
+    def transcribe_words_many(self, audio_paths: Sequence[str]) -> List[List[WordSpan]]:
+        """
+        Transcribe several files with shared chunk batches.
+
+        The returned list is positional: result[i] belongs to audio_paths[i].
+        Chunks are batched across files for GPU throughput, but overlap stitching is
+        still applied independently per file to preserve single-file behavior.
+        """
+        if not audio_paths:
+            return []
+
+        chunks: List[Tuple[int, torch.Tensor, Tuple[float, float]]] = []
+        per_file_words: List[List[WordSpan]] = [[] for _ in audio_paths]
+
+        for file_idx, audio_path in enumerate(audio_paths):
+            segments, bounds = self.split_audio_to_chunks(str(audio_path))
+            if len(segments) != len(bounds):
+                raise RuntimeError(
+                    f"ASR chunk/bound mismatch for {audio_path}: {len(segments)} chunks vs {len(bounds)} bounds"
+                )
+            for segment, bound in zip(segments, bounds):
+                chunks.append((file_idx, segment, bound))
+
+        for i in range(0, len(chunks), self.batch_size):
+            batch = chunks[i : i + self.batch_size]
+            seg_batch = [x[1] for x in batch]
+            bnd_batch = [x[2] for x in batch]
+            batch_groups = self._infer_batch_word_groups(seg_batch, bnd_batch)
+            if len(batch_groups) != len(batch):
+                raise RuntimeError(
+                    f"ASR batch output mismatch: {len(batch_groups)} outputs for {len(batch)} chunks"
+                )
+            for (file_idx, _segment, _bound), words in zip(batch, batch_groups):
+                per_file_words[file_idx].extend(words)
+
+        if (not self.use_vad) and self.overlap_s > 0:
+            per_file_words = [self._stitch_overlapped_words(words) for words in per_file_words]
+
+        return per_file_words
+
     def transcribe_words_from_waveform(
         self,
         audio: torch.Tensor,
@@ -230,8 +270,21 @@ class GigaAMWordTimestampTranscriber:
         Run one forward pass for a batch of variable-length chunks.
         Returns flat list of WordSpan with global timestamps.
         """
+        return [word for group in self._infer_batch_word_groups(segments, bounds) for word in group]
+
+    def _infer_batch_word_groups(
+        self,
+        segments: List[torch.Tensor],
+        bounds: List[Tuple[float, float]],
+    ) -> List[List[WordSpan]]:
+        """
+        Run one forward pass for a batch of variable-length chunks.
+        Returns one word list per input chunk, preserving input order.
+        """
         if not segments:
             return []
+        if len(segments) != len(bounds):
+            raise RuntimeError(f"ASR batch input mismatch: {len(segments)} chunks vs {len(bounds)} bounds")
 
         wav_batch, lengths = self._pad_batch(segments)  # wav_batch: [B, Tmax]
         wav_batch = wav_batch.to(self.model._device).to(self.model._dtype)
@@ -253,7 +306,7 @@ class GigaAMWordTimestampTranscriber:
         B, T, _C = log_probs.shape
         enc_len_list = enc_len.detach().tolist() if enc_len is not None else [T] * B
 
-        out_words: List[WordSpan] = []
+        out_words: List[List[WordSpan]] = []
         for b in range(B):
             b0, b1 = bounds[b]
             chunk_dur_s = float(b1 - b0)
@@ -265,7 +318,7 @@ class GigaAMWordTimestampTranscriber:
                 log_probs[b], self.blank_id, token_text_fn, chunk_start_s=b0, chunk_dur_s=chunk_dur_s, effective_T=effective_T
             )
             seg_words = self._words_from_token_spans(self.tokenizer, token_spans)
-            out_words.extend(seg_words)
+            out_words.append(seg_words)
 
         return out_words
 

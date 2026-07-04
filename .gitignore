@@ -1421,11 +1421,12 @@ coverage*[.json, .xml, .info]
 /.fetch
 erl_crash.dump
 *.ez
-*.beam
+*.beams
 /config/*.secret.exs
 .elixir_ls/
 
 # Another
+.agents
 .build
 !include
 onnx

@@ -80,7 +80,9 @@ def run_full_asr_then_align(job_ctx: dict) -> dict:
     t0 = time.perf_counter()
     segments, speakers, shares = job_ctx["diar_out"]
     cfg = job_ctx["cfg"]
-    words = job_ctx["asr"].transcribe_words(job_ctx["audio_path"])
+    words = job_ctx.get("words")
+    if words is None:
+        words = job_ctx["asr"].transcribe_words(job_ctx["audio_path"])
 
     filt = decide_speaker_filter(
         shares=shares,

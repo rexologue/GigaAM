@@ -7,7 +7,7 @@ import json
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List
+from typing import List, Optional, Sequence
 
 sys.path.append(str(Path(__file__).parent.parent))
 
@@ -26,6 +26,13 @@ from pipeline.manifest import (
     should_skip_by_resume,
 )
 from pipeline.modes import run_diar_cut_then_asr, run_full_asr_then_align
+
+
+def _batched(items: Sequence[dict], batch_size: int) -> List[List[dict]]:
+    if batch_size <= 0:
+        raise ValueError("pipeline.file_batch_size must be > 0")
+    return [list(items[i : i + batch_size]) for i in range(0, len(items), batch_size)]
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -85,13 +92,14 @@ def main() -> int:
         local_files_only=bool(cfg["asr"].get("local_files_only", False)),
         trust_remote_code=bool(cfg["asr"].get("trust_remote_code", True)),
         verify_checksum=cfg["asr"].get("verify_checksum"),
-        batch_size=int(cfg["asr"].get("batch_size", 8)),
+        batch_size=int(cfg["asr"].get("chunk_batch_size", cfg["asr"].get("batch_size", 8))),
     )
 
     mode_fn = run_full_asr_then_align if cfg["pipeline"]["mode"] == "full_asr_then_align" else run_diar_cut_then_asr
     latest = load_journal_latest(journal_path)
     items = _resolve_input_paths(cfg)
     counters: Counter[str] = Counter()
+    pending_items: List[dict] = []
 
     for item in items:
         input_path = item["path"]
@@ -120,10 +128,38 @@ def main() -> int:
             append_jsonl(journal_path, {**row_base, "status": "SKIPPED", "reason": "outputs_exist", "finished_at": _utc_now()})
             counters["SKIPPED"] += 1
             continue
+        pending_items.append(item)
 
+    def process_one(
+        item: dict,
+        *,
+        diar_out: Optional[tuple] = None,
+        words: Optional[list] = None,
+        failed_reason: Optional[str] = None,
+    ) -> None:
+        input_path = item["path"]
+        item_id = item["id"]
+        row_base = {
+            "input_path": input_path,
+            "id": item_id,
+            "started_at": _utc_now(),
+            "config": cfg,
+        }
+        if failed_reason is not None:
+            append_jsonl(journal_path, {**row_base, "status": "FAILED", "reason": failed_reason, "finished_at": _utc_now()})
+            counters["FAILED"] += 1
+            return
+
+        tr = transcripts_dir / f"{item_id}.json"
+        ma = meta_asr_dir / f"{item_id}.json"
+        md = meta_diar_dir / f"{item_id}.json"
         try:
-            diar_out = diarizer.diarize([input_path], batch_size=1)[0]
-            result = mode_fn({"audio_path": input_path, "diar_out": diar_out, "asr": asr, "cfg": cfg})
+            if diar_out is None:
+                diar_out = diarizer.diarize([input_path], batch_size=1)[0]
+            job_ctx = {"audio_path": input_path, "diar_out": diar_out, "asr": asr, "cfg": cfg}
+            if words is not None:
+                job_ctx["words"] = words
+            result = mode_fn(job_ctx)
             if result["status"] == "BAD_SAMPLE":
                 append_jsonl(
                     journal_path,
@@ -137,7 +173,7 @@ def main() -> int:
                     },
                 )
                 counters["BAD_SAMPLE"] += 1
-                continue
+                return
 
             transcript = result["transcript"]
             transcript["file_id"] = item_id
@@ -149,6 +185,42 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             append_jsonl(journal_path, {**row_base, "status": "FAILED", "reason": repr(exc), "finished_at": _utc_now()})
             counters["FAILED"] += 1
+
+    def process_batch(batch_items: List[dict]) -> None:
+        paths = [item["path"] for item in batch_items]
+        diar_batch_size = int(cfg["diarizer"].get("batch_size") or len(paths))
+        try:
+            diar_outputs = diarizer.diarize(paths, batch_size=diar_batch_size)
+            if len(diar_outputs) != len(batch_items):
+                raise RuntimeError(f"Diarizer returned {len(diar_outputs)} outputs for {len(batch_items)} inputs")
+
+            words_outputs = None
+            if cfg["pipeline"]["mode"] == "full_asr_then_align":
+                words_outputs = asr.transcribe_words_many(paths)
+                if len(words_outputs) != len(batch_items):
+                    raise RuntimeError(f"ASR returned {len(words_outputs)} outputs for {len(batch_items)} inputs")
+        except Exception as exc:  # noqa: BLE001
+            if len(batch_items) == 1:
+                process_one(batch_items[0], failed_reason=repr(exc))
+                return
+            for item in batch_items:
+                process_one(item)
+            return
+
+        for idx, item in enumerate(batch_items):
+            words = words_outputs[idx] if words_outputs is not None else None
+            process_one(item, diar_out=diar_outputs[idx], words=words)
+
+    execution = cfg["pipeline"].get("execution", "sequential")
+    if execution == "sequential":
+        for item in pending_items:
+            process_one(item)
+    elif execution == "batched":
+        file_batch_size = int(cfg["pipeline"].get("file_batch_size", 1))
+        for batch_items in _batched(pending_items, file_batch_size):
+            process_batch(batch_items)
+    else:
+        raise ValueError("pipeline.execution must be sequential or batched")
 
     has_runtime_failures = counters.get("FAILED", 0) > 0
     summary_status = "done_with_errors" if has_runtime_failures else "done"
