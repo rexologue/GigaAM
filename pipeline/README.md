@@ -100,6 +100,8 @@ pipeline:
   mode: full_asr_then_align
   execution: sequential
   file_batch_size: 4
+  show_progress: true
+  suppress_internal_progress: true
 ```
 
 - `sequential` keeps the old behavior: one audio file is diarized and transcribed at a time.
@@ -117,6 +119,8 @@ asr:
 ```
 
 `overlap_sec` keeps the same quality behavior in both execution modes. Chunks may overlap, and duplicate words are stitched independently inside each file after inference. The batched path does not stitch words across files.
+
+When `show_progress` is enabled, the CLI shows one pipeline-level progress bar with throughput, ETA, and a status postfix. `suppress_internal_progress` redirects noisy model-level stdout/stderr during inference so library progress bars, including NeMo's per-sample progress, do not clutter the output. The final JSON summary is still printed to stdout.
 
 ## Model references
 

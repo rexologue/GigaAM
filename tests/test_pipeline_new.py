@@ -118,5 +118,7 @@ def test_config_defaults_and_legacy_asr_batch_size(tmp_path: Path):
 
     assert cfg["pipeline"]["execution"] == "sequential"
     assert cfg["pipeline"]["file_batch_size"] == 1
+    assert cfg["pipeline"]["show_progress"] is True
+    assert cfg["pipeline"]["suppress_internal_progress"] is True
     assert cfg["asr"]["chunk_batch_size"] == 3
     assert "batch_size" not in cfg["asr"]

@@ -30,6 +30,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "mode": "full_asr_then_align",
         "execution": "sequential",
         "file_batch_size": 1,
+        "show_progress": True,
+        "suppress_internal_progress": True,
     },
     "diarizer": {
         "model_name": "nvidia/diar_streaming_sortformer_4spk-v2.1",

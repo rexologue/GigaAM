@@ -4,14 +4,17 @@ from __future__ import annotations
 import argparse
 import sys
 import json
+import contextlib
+import os
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Iterator, List, Optional, Sequence
 
 sys.path.append(str(Path(__file__).parent.parent))
 
 from omegaconf import OmegaConf
+from tqdm import tqdm
 
 from pipeline.diarizer import Diarizer
 from pipeline.word_timestamps import GigaAMWordTimestampTranscriber
@@ -32,6 +35,30 @@ def _batched(items: Sequence[dict], batch_size: int) -> List[List[dict]]:
     if batch_size <= 0:
         raise ValueError("pipeline.file_batch_size must be > 0")
     return [list(items[i : i + batch_size]) for i in range(0, len(items), batch_size)]
+
+
+@contextlib.contextmanager
+def _suppress_output(enabled: bool) -> Iterator[None]:
+    if not enabled:
+        yield
+        return
+    with open(os.devnull, "w", encoding="utf-8") as devnull:
+        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+            yield
+
+
+def _progress_postfix(counters: Counter[str], done: int) -> str:
+    denom = max(1, done)
+
+    def pct(key: str) -> str:
+        return f"{(100.0 * counters.get(key, 0) / denom):.1f}%"
+
+    return (
+        f"ok={counters.get('SUCCESS', 0)}({pct('SUCCESS')}) "
+        f"fail={counters.get('FAILED', 0)}({pct('FAILED')}) "
+        f"bad={counters.get('BAD_SAMPLE', 0)}({pct('BAD_SAMPLE')}) "
+        f"skip={counters.get('SKIPPED', 0)}({pct('SKIPPED')})"
+    )
 
 
 def _utc_now() -> str:
@@ -100,6 +127,14 @@ def main() -> int:
     items = _resolve_input_paths(cfg)
     counters: Counter[str] = Counter()
     pending_items: List[dict] = []
+    show_progress = bool(cfg["pipeline"].get("show_progress", True))
+    suppress_internal_progress = bool(cfg["pipeline"].get("suppress_internal_progress", True))
+    pbar = tqdm(total=len(items), desc="Dialog pipeline", unit="file", dynamic_ncols=True, disable=not show_progress)
+
+    def record_status(status: str) -> None:
+        counters[status] += 1
+        pbar.update(1)
+        pbar.set_postfix_str(_progress_postfix(counters, int(pbar.n)))
 
     for item in items:
         input_path = item["path"]
@@ -118,7 +153,7 @@ def main() -> int:
             retry_failed=bool(cfg["resume"].get("retry_failed", False)),
         ):
             append_jsonl(journal_path, {**row_base, "status": "SKIPPED", "reason": "resume", "finished_at": _utc_now()})
-            counters["SKIPPED"] += 1
+            record_status("SKIPPED")
             continue
 
         tr = transcripts_dir / f"{item_id}.json"
@@ -126,7 +161,7 @@ def main() -> int:
         md = meta_diar_dir / f"{item_id}.json"
         if bool(cfg["resume"].get("skip_if_outputs_exist", True)) and tr.exists() and ma.exists() and md.exists():
             append_jsonl(journal_path, {**row_base, "status": "SKIPPED", "reason": "outputs_exist", "finished_at": _utc_now()})
-            counters["SKIPPED"] += 1
+            record_status("SKIPPED")
             continue
         pending_items.append(item)
 
@@ -147,7 +182,7 @@ def main() -> int:
         }
         if failed_reason is not None:
             append_jsonl(journal_path, {**row_base, "status": "FAILED", "reason": failed_reason, "finished_at": _utc_now()})
-            counters["FAILED"] += 1
+            record_status("FAILED")
             return
 
         tr = transcripts_dir / f"{item_id}.json"
@@ -155,7 +190,9 @@ def main() -> int:
         md = meta_diar_dir / f"{item_id}.json"
         try:
             if diar_out is None:
-                diar_out = diarizer.diarize([input_path], batch_size=1)[0]
+                with _suppress_output(suppress_internal_progress):
+                    diar_out = diarizer.diarize([input_path], batch_size=1)[0]
+                pbar.refresh()
             job_ctx = {"audio_path": input_path, "diar_out": diar_out, "asr": asr, "cfg": cfg}
             if words is not None:
                 job_ctx["words"] = words
@@ -172,7 +209,7 @@ def main() -> int:
                         "finished_at": _utc_now(),
                     },
                 )
-                counters["BAD_SAMPLE"] += 1
+                record_status("BAD_SAMPLE")
                 return
 
             transcript = result["transcript"]
@@ -181,22 +218,26 @@ def main() -> int:
             atomic_json_dump(ma, result["meta_asr"])
             atomic_json_dump(md, result["meta_diar"])
             append_jsonl(journal_path, {**row_base, "status": "SUCCESS", "reason": None, "finished_at": _utc_now()})
-            counters["SUCCESS"] += 1
+            record_status("SUCCESS")
         except Exception as exc:  # noqa: BLE001
             append_jsonl(journal_path, {**row_base, "status": "FAILED", "reason": repr(exc), "finished_at": _utc_now()})
-            counters["FAILED"] += 1
+            record_status("FAILED")
 
     def process_batch(batch_items: List[dict]) -> None:
         paths = [item["path"] for item in batch_items]
         diar_batch_size = int(cfg["diarizer"].get("batch_size") or len(paths))
         try:
-            diar_outputs = diarizer.diarize(paths, batch_size=diar_batch_size)
+            with _suppress_output(suppress_internal_progress):
+                diar_outputs = diarizer.diarize(paths, batch_size=diar_batch_size)
+            pbar.refresh()
             if len(diar_outputs) != len(batch_items):
                 raise RuntimeError(f"Diarizer returned {len(diar_outputs)} outputs for {len(batch_items)} inputs")
 
             words_outputs = None
             if cfg["pipeline"]["mode"] == "full_asr_then_align":
-                words_outputs = asr.transcribe_words_many(paths)
+                with _suppress_output(suppress_internal_progress):
+                    words_outputs = asr.transcribe_words_many(paths)
+                pbar.refresh()
                 if len(words_outputs) != len(batch_items):
                     raise RuntimeError(f"ASR returned {len(words_outputs)} outputs for {len(batch_items)} inputs")
         except Exception as exc:  # noqa: BLE001
@@ -221,6 +262,8 @@ def main() -> int:
             process_batch(batch_items)
     else:
         raise ValueError("pipeline.execution must be sequential or batched")
+
+    pbar.close()
 
     has_runtime_failures = counters.get("FAILED", 0) > 0
     summary_status = "done_with_errors" if has_runtime_failures else "done"

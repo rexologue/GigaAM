@@ -13,6 +13,8 @@ pipeline:
   # batched groups several files for Sortformer and, in full_asr_then_align, GigaAM CTC.
   execution: sequential
   file_batch_size: 4
+  show_progress: true
+  suppress_internal_progress: true
 
 diarizer:
   model_name: nvidia/diar_streaming_sortformer_4spk-v2.1
